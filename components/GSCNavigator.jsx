@@ -14,6 +14,7 @@ export default function GSCNavigator({ onComplete }) {
   
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Auto-scroll
   useEffect(() => {
@@ -48,8 +49,8 @@ Ti guiderò attraverso un'analisi completa di Google Search Console per identifi
 
 L'analisi è divisa in **${GSC_ANALYSIS_FRAMEWORK.phases.length} fasi**. Per ogni fase ti chiederò dati specifici da GSC — tu dovrai solo:
 1. Seguire le mie istruzioni
-2. Esportare/copiare i dati
-3. Incollarli qui
+2. **Esportare il CSV/TSV** da GSC
+3. **Caricare il file** o incollare i dati
 
 Pronto? Iniziamo! 🚀`);
 
@@ -86,7 +87,9 @@ _${nextPhase.description}_`);
           const nextQuery = nextPhase.queries[0];
           addMessage('agent', `📋 **${nextQuery.question}**
 
-_Scopo: ${nextQuery.purpose}_`, { isQuestion: true, queryId: nextQuery.id });
+_Scopo: ${nextQuery.purpose}_
+
+📎 **Carica il file CSV/TSV** oppure incolla i dati qui sotto.`, { isQuestion: true, queryId: nextQuery.id });
         }, 1000);
       } else {
         generateFinalReport();
@@ -104,36 +107,147 @@ _${phase.description}_
 
 📋 **${query.question}**
 
-_Scopo: ${query.purpose}_`, { isQuestion: true, queryId: query.id });
+_Scopo: ${query.purpose}_
+
+📎 **Carica il file CSV/TSV** esportato da GSC, oppure incolla i dati qui sotto.`, { isQuestion: true, queryId: query.id });
     } else {
       addMessage('agent', `📋 **${query.question}**
 
-_Scopo: ${query.purpose}_`, { isQuestion: true, queryId: query.id });
+_Scopo: ${query.purpose}_
+
+📎 **Carica il file CSV/TSV** oppure incolla i dati.`, { isQuestion: true, queryId: query.id });
     }
   };
 
-  // Analyze data via API
-  const analyzeData = async (type, data) => {
+  // Handle file upload
+  const handleFileUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // Reset file input so same file can be selected again
+    event.target.value = '';
+
+    const fileName = file.name;
+    addMessage('user', `📎 File caricato: ${fileName}`);
+
+    // Read file content
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const content = e.target.result;
+      await processData(content, fileName);
+    };
+    reader.onerror = () => {
+      addMessage('agent', `❌ Errore nella lettura del file. Riprova o incolla i dati manualmente.`);
+    };
+    reader.readAsText(file);
+  };
+
+  // Process data (from file or paste)
+  const processData = async (data, source = 'incollato') => {
+    const phase = GSC_ANALYSIS_FRAMEWORK.phases[currentPhase];
+    const query = phase?.queries[currentQuery];
+
+    if (!query) {
+      addMessage('agent', 'Grazie! Vuoi continuare con l\'analisi o hai domande specifiche?');
+      return;
+    }
+
+    setIsAnalyzing(true);
+
     try {
+      // Analyze the data via API
       const response = await fetch('/api/analyze-gsc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, data })
+        body: JSON.stringify({ type: query.analysis, data })
       });
       
       const result = await response.json();
-      return result.success ? result.analysis : { error: result.error };
+      const analysis = result.success ? result.analysis : { error: result.error };
+
+      // Store the data
+      setCollectedData(prev => ({
+        ...prev,
+        [query.id]: { raw: data, analysis, source }
+      }));
+
+      // Generate response based on analysis
+      if (analysis.error) {
+        addMessage('agent', `⚠️ Problema con i dati: ${analysis.error}
+
+**Suggerimenti:**
+- Assicurati di esportare da GSC cliccando il bottone **Export** (icona download)
+- Scegli formato **CSV** o **TSV**
+- Il file deve contenere almeno l'header e qualche riga di dati
+
+Riprova a caricare il file, oppure scrivi "skip" per saltare questo step.`);
+      } else {
+        let response = `### 📊 Analisi Completata\n\n`;
+        
+        if (analysis.insights) {
+          response += analysis.insights.join('\n\n') + '\n\n';
+        }
+
+        // Show top data points based on analysis type
+        if (analysis.data?.quickWins?.length > 0) {
+          response += `**Top 5 Quick Wins (keyword in 2a pagina):**\n`;
+          analysis.data.quickWins.slice(0, 5).forEach((q, i) => {
+            response += `${i + 1}. "${q.query}" — pos. ${q.position.toFixed(1)}, ${q.impressions.toLocaleString()} impression\n`;
+          });
+          response += '\n';
+        }
+
+        if (analysis.data?.opportunities?.length > 0) {
+          response += `**Top 5 CTR Opportunities:**\n`;
+          analysis.data.opportunities.slice(0, 5).forEach((q, i) => {
+            response += `${i + 1}. "${q.query}" — CTR ${q.ctr.toFixed(1)}%, ${q.impressions.toLocaleString()} impression\n`;
+          });
+          response += '\n';
+        }
+
+        if (analysis.data?.topByClicks?.length > 0) {
+          response += `**Top 5 Query per Click:**\n`;
+          analysis.data.topByClicks.slice(0, 5).forEach((q, i) => {
+            response += `${i + 1}. "${q.query}" — ${q.clicks} click, pos. ${q.position.toFixed(1)}\n`;
+          });
+          response += '\n';
+        }
+
+        if (analysis.data?.underperforming?.length > 0) {
+          response += `**Pagine Underperforming:**\n`;
+          analysis.data.underperforming.slice(0, 5).forEach((p, i) => {
+            const pageName = p.page.split('/').filter(Boolean).pop() || p.page;
+            response += `${i + 1}. ${pageName} — CTR ${p.ctr.toFixed(1)}%\n`;
+          });
+        }
+
+        addMessage('agent', response, { analysis });
+
+        // Move to next question
+        setCurrentQuery(q => q + 1);
+        setTimeout(() => {
+          askNextQuestion();
+        }, 2000);
+      }
     } catch (error) {
-      return { error: error.message };
+      addMessage('agent', `❌ Errore durante l'analisi: ${error.message}. Riprova.`);
     }
+
+    setIsAnalyzing(false);
   };
 
-  // Handle user input
+  // Handle text submit
   const handleSubmit = async () => {
     if (!input.trim()) return;
     
     const userInput = input.trim();
     setInput('');
+    
+    // Check for skip command
+    if (userInput.toLowerCase() === 'skip') {
+      handleSkip();
+      return;
+    }
     
     // Show truncated message for large data
     addMessage('user', userInput.length > 500 
@@ -141,83 +255,7 @@ _Scopo: ${query.purpose}_`, { isQuestion: true, queryId: query.id });
       : userInput
     );
 
-    const phase = GSC_ANALYSIS_FRAMEWORK.phases[currentPhase];
-    const query = phase?.queries[currentQuery];
-
-    if (!query) {
-      addMessage('agent', 'Grazie per il feedback! Vuoi continuare con l\'analisi o hai domande specifiche?');
-      return;
-    }
-
-    setIsAnalyzing(true);
-
-    // Analyze the data
-    const analysis = await analyzeData(query.analysis, userInput);
-    
-    // Store the data
-    setCollectedData(prev => ({
-      ...prev,
-      [query.id]: { raw: userInput, analysis }
-    }));
-
-    // Generate response based on analysis
-    if (analysis.error) {
-      addMessage('agent', `⚠️ Non sono riuscito a parsare i dati. Assicurati di:
-- Esportare da GSC in formato TSV o CSV
-- Includere l'header (prima riga con nomi colonne)
-- Copiare tutte le righe
-
-Riprova a incollare i dati, oppure scrivi "skip" per saltare questo step.`);
-    } else {
-      let response = `### 📊 Analisi\n\n`;
-      
-      if (analysis.insights) {
-        response += analysis.insights.join('\n\n') + '\n\n';
-      }
-
-      // Show top data points based on analysis type
-      if (analysis.data?.quickWins?.length > 0) {
-        response += `**Top 5 Quick Wins (keyword in 2a pagina):**\n`;
-        analysis.data.quickWins.slice(0, 5).forEach((q, i) => {
-          response += `${i + 1}. "${q.query}" — pos. ${q.position.toFixed(1)}, ${q.impressions.toLocaleString()} impression\n`;
-        });
-        response += '\n';
-      }
-
-      if (analysis.data?.opportunities?.length > 0) {
-        response += `**Top 5 CTR Opportunities:**\n`;
-        analysis.data.opportunities.slice(0, 5).forEach((q, i) => {
-          response += `${i + 1}. "${q.query}" — CTR ${q.ctr.toFixed(1)}%, ${q.impressions.toLocaleString()} impression\n`;
-        });
-        response += '\n';
-      }
-
-      if (analysis.data?.topByClicks?.length > 0) {
-        response += `**Top 5 Query per Click:**\n`;
-        analysis.data.topByClicks.slice(0, 5).forEach((q, i) => {
-          response += `${i + 1}. "${q.query}" — ${q.clicks} click, pos. ${q.position.toFixed(1)}\n`;
-        });
-        response += '\n';
-      }
-
-      if (analysis.data?.underperforming?.length > 0) {
-        response += `**Pagine Underperforming:**\n`;
-        analysis.data.underperforming.slice(0, 5).forEach((p, i) => {
-          const pageName = p.page.split('/').filter(Boolean).pop() || p.page;
-          response += `${i + 1}. ${pageName} — CTR ${p.ctr.toFixed(1)}%\n`;
-        });
-      }
-
-      addMessage('agent', response, { analysis });
-
-      // Move to next question
-      setCurrentQuery(q => q + 1);
-      setTimeout(() => {
-        askNextQuestion();
-      }, 2000);
-    }
-
-    setIsAnalyzing(false);
+    await processData(userInput, 'incollato');
   };
 
   // Handle skip
@@ -282,11 +320,7 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (input.toLowerCase().trim() === 'skip') {
-        handleSkip();
-      } else {
-        handleSubmit();
-      }
+      handleSubmit();
     }
   };
 
@@ -337,6 +371,15 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
 
   return (
     <div className="flex flex-col h-[calc(100vh-180px)]">
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,.tsv,.txt"
+        onChange={handleFileUpload}
+        className="hidden"
+      />
+
       {/* Progress Header */}
       {messages.length > 0 && (
         <div className="px-6 py-3 bg-black/20 border-b border-white/10">
@@ -462,15 +505,28 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
           ) : (
             <>
               <div className="flex gap-3">
+                {/* File Upload Button */}
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isAnalyzing}
+                  className="px-4 py-3 bg-gsc/20 border border-gsc/50 rounded-xl text-gsc font-medium hover:bg-gsc/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <span>📎</span>
+                  <span>Carica CSV</span>
+                </button>
+
+                {/* Text input */}
                 <textarea
                   ref={textareaRef}
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder="Incolla qui i dati esportati da GSC... (o scrivi 'skip' per saltare)"
-                  className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white text-sm resize-none focus:border-gsc/50 transition-colors"
-                  style={{ minHeight: '56px', maxHeight: '150px' }}
+                  placeholder="...oppure incolla qui i dati (o scrivi 'skip' per saltare)"
+                  disabled={isAnalyzing}
+                  className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white text-sm resize-none focus:border-gsc/50 transition-colors disabled:opacity-50"
+                  style={{ minHeight: '48px', maxHeight: '120px' }}
                 />
+                
                 <button
                   onClick={handleSubmit}
                   disabled={!input.trim() || isAnalyzing}
@@ -479,10 +535,11 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
                   Invia
                 </button>
               </div>
+              
               <div className="mt-2 text-xs text-gray-500 flex gap-4">
-                <span>💡 Esporta da GSC in formato TSV o CSV</span>
+                <span>💡 Esporta da GSC con il bottone "Export" → Scarica CSV</span>
                 <span>•</span>
-                <span>Scrivi "skip" per saltare uno step</span>
+                <span>Scrivi "skip" per saltare</span>
               </div>
             </>
           )}
