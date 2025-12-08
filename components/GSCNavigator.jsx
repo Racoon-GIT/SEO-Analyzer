@@ -11,6 +11,7 @@ export default function GSCNavigator({ onComplete }) {
   const [collectedData, setCollectedData] = useState({});
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
+  const [shouldAdvance, setShouldAdvance] = useState(false);
   
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -20,6 +21,17 @@ export default function GSCNavigator({ onComplete }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Handle advancing to next question after state updates
+  useEffect(() => {
+    if (shouldAdvance) {
+      setShouldAdvance(false);
+      const timer = setTimeout(() => {
+        askNextQuestion(currentPhase, currentQuery);
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [shouldAdvance, currentPhase, currentQuery]);
 
   // Add message helper
   const addMessage = (role, content, data = null) => {
@@ -55,27 +67,28 @@ L'analisi è divisa in **${GSC_ANALYSIS_FRAMEWORK.phases.length} fasi**. Per ogn
 Pronto? Iniziamo! 🚀`);
 
     setTimeout(() => {
-      askNextQuestion();
+      askNextQuestion(0, 0);
     }, 1500);
   };
 
   // Ask the next question in the sequence
-  const askNextQuestion = () => {
-    const phase = GSC_ANALYSIS_FRAMEWORK.phases[currentPhase];
+  const askNextQuestion = (phaseIdx, queryIdx) => {
+    const phase = GSC_ANALYSIS_FRAMEWORK.phases[phaseIdx];
     if (!phase) {
       generateFinalReport();
       return;
     }
 
-    const query = phase.queries[currentQuery];
+    const query = phase.queries[queryIdx];
     if (!query) {
       // Move to next phase
-      const nextPhaseIndex = currentPhase + 1;
-      setCurrentPhase(nextPhaseIndex);
-      setCurrentQuery(0);
-      
+      const nextPhaseIndex = phaseIdx + 1;
       const nextPhase = GSC_ANALYSIS_FRAMEWORK.phases[nextPhaseIndex];
+      
       if (nextPhase) {
+        setCurrentPhase(nextPhaseIndex);
+        setCurrentQuery(0);
+        
         addMessage('agent', `✅ **Fase "${phase.name}" completata!**
 
 ---
@@ -98,7 +111,7 @@ _Scopo: ${nextQuery.purpose}_
     }
 
     // Ask this question
-    if (currentQuery === 0 && currentPhase === 0) {
+    if (queryIdx === 0 && phaseIdx === 0) {
       // First question ever
       addMessage('agent', `## Fase 1: ${phase.name}
 _${phase.description}_
@@ -124,13 +137,11 @@ _Scopo: ${query.purpose}_
     const file = event.target.files[0];
     if (!file) return;
 
-    // Reset file input so same file can be selected again
     event.target.value = '';
 
     const fileName = file.name;
     addMessage('user', `📎 File caricato: ${fileName}`);
 
-    // Read file content
     const reader = new FileReader();
     reader.onload = async (e) => {
       const content = e.target.result;
@@ -155,7 +166,6 @@ _Scopo: ${query.purpose}_
     setIsAnalyzing(true);
 
     try {
-      // Analyze the data via API
       const response = await fetch('/api/analyze-gsc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -171,7 +181,6 @@ _Scopo: ${query.purpose}_
         [query.id]: { raw: data, analysis, source }
       }));
 
-      // Generate response based on analysis
       if (analysis.error) {
         addMessage('agent', `⚠️ Problema con i dati: ${analysis.error}
 
@@ -182,52 +191,71 @@ _Scopo: ${query.purpose}_
 
 Riprova a caricare il file, oppure scrivi "skip" per saltare questo step.`);
       } else {
-        let response = `### 📊 Analisi Completata\n\n`;
+        let responseText = `### 📊 Analisi Completata\n\n`;
         
         if (analysis.insights) {
-          response += analysis.insights.join('\n\n') + '\n\n';
+          responseText += analysis.insights.join('\n\n') + '\n\n';
         }
 
-        // Show top data points based on analysis type
         if (analysis.data?.quickWins?.length > 0) {
-          response += `**Top 5 Quick Wins (keyword in 2a pagina):**\n`;
+          responseText += `**Top 5 Quick Wins (keyword in 2a pagina):**\n`;
           analysis.data.quickWins.slice(0, 5).forEach((q, i) => {
-            response += `${i + 1}. "${q.query}" — pos. ${q.position.toFixed(1)}, ${q.impressions.toLocaleString()} impression\n`;
+            responseText += `${i + 1}. "${q.query}" — pos. ${q.position.toFixed(1)}, ${q.impressions.toLocaleString()} impression\n`;
           });
-          response += '\n';
+          responseText += '\n';
         }
 
         if (analysis.data?.opportunities?.length > 0) {
-          response += `**Top 5 CTR Opportunities:**\n`;
+          responseText += `**Top 5 CTR Opportunities:**\n`;
           analysis.data.opportunities.slice(0, 5).forEach((q, i) => {
-            response += `${i + 1}. "${q.query}" — CTR ${q.ctr.toFixed(1)}%, ${q.impressions.toLocaleString()} impression\n`;
+            responseText += `${i + 1}. "${q.query}" — CTR ${q.ctr.toFixed(1)}%, ${q.impressions.toLocaleString()} impression\n`;
           });
-          response += '\n';
+          responseText += '\n';
         }
 
         if (analysis.data?.topByClicks?.length > 0) {
-          response += `**Top 5 Query per Click:**\n`;
+          responseText += `**Top 5 Query per Click:**\n`;
           analysis.data.topByClicks.slice(0, 5).forEach((q, i) => {
-            response += `${i + 1}. "${q.query}" — ${q.clicks} click, pos. ${q.position.toFixed(1)}\n`;
+            responseText += `${i + 1}. "${q.query}" — ${q.clicks} click, pos. ${q.position.toFixed(1)}\n`;
           });
-          response += '\n';
+          responseText += '\n';
+        }
+
+        if (analysis.data?.topPages?.length > 0) {
+          responseText += `**Top 5 Pagine per Click:**\n`;
+          analysis.data.topPages.slice(0, 5).forEach((p, i) => {
+            const pageName = p.page.split('/').filter(Boolean).pop() || p.page;
+            responseText += `${i + 1}. ${pageName} — ${p.clicks} click\n`;
+          });
+          responseText += '\n';
         }
 
         if (analysis.data?.underperforming?.length > 0) {
-          response += `**Pagine Underperforming:**\n`;
+          responseText += `**Pagine Underperforming:**\n`;
           analysis.data.underperforming.slice(0, 5).forEach((p, i) => {
             const pageName = p.page.split('/').filter(Boolean).pop() || p.page;
-            response += `${i + 1}. ${pageName} — CTR ${p.ctr.toFixed(1)}%\n`;
+            responseText += `${i + 1}. ${pageName} — CTR ${p.ctr.toFixed(1)}%\n`;
           });
         }
 
-        addMessage('agent', response, { analysis });
+        addMessage('agent', responseText, { analysis });
 
-        // Move to next question
-        setCurrentQuery(q => q + 1);
-        setTimeout(() => {
-          askNextQuestion();
-        }, 2000);
+        // Calculate next indices
+        const nextQueryIdx = currentQuery + 1;
+        const phase = GSC_ANALYSIS_FRAMEWORK.phases[currentPhase];
+        
+        if (nextQueryIdx >= phase.queries.length) {
+          // Move to next phase
+          const nextPhaseIdx = currentPhase + 1;
+          setCurrentPhase(nextPhaseIdx);
+          setCurrentQuery(0);
+        } else {
+          // Move to next query in same phase
+          setCurrentQuery(nextQueryIdx);
+        }
+        
+        // Trigger the advance after state updates
+        setShouldAdvance(true);
       }
     } catch (error) {
       addMessage('agent', `❌ Errore durante l'analisi: ${error.message}. Riprova.`);
@@ -243,13 +271,11 @@ Riprova a caricare il file, oppure scrivi "skip" per saltare questo step.`);
     const userInput = input.trim();
     setInput('');
     
-    // Check for skip command
     if (userInput.toLowerCase() === 'skip') {
       handleSkip();
       return;
     }
     
-    // Show truncated message for large data
     addMessage('user', userInput.length > 500 
       ? `[Dati incollati: ${userInput.split('\n').length} righe]` 
       : userInput
@@ -263,10 +289,19 @@ Riprova a caricare il file, oppure scrivi "skip" per saltare questo step.`);
     setInput('');
     addMessage('user', '[Saltato]');
     addMessage('agent', '⏭️ Ok, saltiamo questo step. Possiamo tornarci dopo se vuoi.');
-    setCurrentQuery(q => q + 1);
-    setTimeout(() => {
-      askNextQuestion();
-    }, 1000);
+    
+    // Calculate next indices
+    const nextQueryIdx = currentQuery + 1;
+    const phase = GSC_ANALYSIS_FRAMEWORK.phases[currentPhase];
+    
+    if (nextQueryIdx >= phase.queries.length) {
+      setCurrentPhase(prev => prev + 1);
+      setCurrentQuery(0);
+    } else {
+      setCurrentQuery(nextQueryIdx);
+    }
+    
+    setShouldAdvance(true);
   };
 
   // Generate final report
@@ -282,7 +317,6 @@ Riprova a caricare il file, oppure scrivi "skip" per saltare questo step.`);
     const dataPoints = Object.keys(collectedData).length;
     report += `Ho analizzato **${dataPoints} aree** del tuo Google Search Console.\n\n`;
 
-    // Aggregate insights
     let totalQuickWins = 0;
     let totalCTROpps = 0;
 
@@ -348,13 +382,11 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
         return <p key={i} className="ml-4 my-0.5 text-gray-300">{line}</p>;
       }
       
-      // Bold text
       const parts = line.split(/\*\*(.*?)\*\*/g);
       const rendered = parts.map((part, j) => 
         j % 2 === 1 ? <strong key={j} className="text-white">{part}</strong> : part
       );
       
-      // Italic text
       const withItalics = rendered.map((part, j) => {
         if (typeof part === 'string') {
           const italicParts = part.split(/_(.*?)_/g);
@@ -371,7 +403,6 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
 
   return (
     <div className="flex flex-col h-[calc(100vh-180px)]">
-      {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
@@ -380,7 +411,6 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
         className="hidden"
       />
 
-      {/* Progress Header */}
       {messages.length > 0 && (
         <div className="px-6 py-3 bg-black/20 border-b border-white/10">
           <div className="flex items-center justify-between mb-2">
@@ -419,7 +449,6 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
         </div>
       )}
 
-      {/* Messages */}
       <div className="flex-1 overflow-auto p-6 space-y-4">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center">
@@ -476,7 +505,6 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input / Complete Actions */}
       {messages.length > 0 && (
         <div className="px-6 py-4 border-t border-white/10 bg-black/30">
           {isComplete ? (
@@ -505,7 +533,6 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
           ) : (
             <>
               <div className="flex gap-3">
-                {/* File Upload Button */}
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isAnalyzing}
@@ -515,7 +542,6 @@ Clicca il pulsante qui sotto per tornare al sistema principale e continuare con 
                   <span>Carica CSV</span>
                 </button>
 
-                {/* Text input */}
                 <textarea
                   ref={textareaRef}
                   value={input}
